@@ -1,0 +1,64 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function meDoc() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data; }
+    function active() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && meDoc().on == 1;
+    }
+    function role() { return meDoc().role; }
+    function isOwner()   { return active() && role() == 'admin'; }
+    function isMgr()     { return active() && (role() == 'admin' || role() == 'mgr'); }
+    function isSales()   { return active() && role() == 'emp'; }
+    function isFactory() { return active() && role() == 'fac'; }
+    function noCore()    { return !exists(/databases/$(database)/documents/settings/core); }
+
+    // الموظفون: المالك فقط يضيف ويعدّل. أول حساب مالك يُنشأ مرة واحدة عند التهيئة.
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || active());
+      allow create: if isOwner()
+        || (signedIn() && request.auth.uid == uid && noCore()
+            && request.resource.data.role == 'admin'
+            && request.resource.data.uid == uid);
+      allow update: if isOwner();
+      allow delete: if false;
+    }
+
+    // الإعدادات: قراءة لكل المفعّلين، تعديل للمالك فقط.
+    match /settings/{id} {
+      allow read: if active();
+      allow create: if (id == 'core' && signedIn() && noCore()) || isOwner();
+      allow update: if isOwner();
+      allow delete: if false;
+    }
+
+    // عدّاد أرقام الفواتير
+    match /counters/{id} {
+      allow read, write: if isMgr() || isSales();
+    }
+
+    // الفواتير: لا حذف نهائي أبدًا.
+    match /invoices/{id} {
+      allow read: if isMgr() || (isSales() && resource.data.empUid == request.auth.uid);
+      allow create: if isMgr() || (isSales() && request.resource.data.empUid == request.auth.uid);
+      allow update: if isMgr()
+        || (isSales() && resource.data.empUid == request.auth.uid
+            && resource.data.status == 'مؤكدة'
+            && request.resource.data.empUid == request.auth.uid);
+      allow delete: if false;
+    }
+
+    // طلبات المصنع
+    match /tasks/{id} {
+      allow read: if isMgr() || isSales()
+        || (isFactory() && (resource.data.toUid == '' || resource.data.toUid == request.auth.uid));
+      allow create: if isMgr();
+      allow update: if isMgr() || isSales()
+        || (isFactory() && (resource.data.toUid == '' || resource.data.toUid == request.auth.uid));
+      allow delete: if false;
+    }
+  }
+}
